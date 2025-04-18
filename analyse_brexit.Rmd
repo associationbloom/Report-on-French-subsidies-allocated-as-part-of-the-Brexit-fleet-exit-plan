@@ -1,5 +1,5 @@
 ---
-title: "Analyse des subventions accordées dans le cadre de la réserve d'ajustement BREXIT"
+title: "Analysis of subsidies granted as part of the frenche BREXIT exit plan"
 output: html_document
 date: "`r Sys.Date()`"
 ---
@@ -27,7 +27,8 @@ load_packages("lubridate",
               "rnaturaearth",
               "egg",
               "foreach", 
-              "devtools")
+              "devtools",
+              "viridis")
 
 #devtools::install_github("ropensci/rnaturalearth")
 #library(rnaturalearth)
@@ -37,16 +38,23 @@ source("script/trajectory_with_events_gfw.R")
 source("script/fishing_eez_summary.R")
 
 ```
+
 We load the Exclusive Economic Zone shapefiles 
 
 ```{r}
 
-eez <- st_read(dsn = "data/raw/shapefiles/World_EEZ_v11_20191118", layer = "eez_v11", quiet = T) %>%
+url <- "https://www.dropbox.com/scl/fo/99nqe5od6hlc4urug5dmt/ANSFN9m2wHBuVvQOs3O1Lgg?rlkey=ni426isn7pgs4jt9x9nn9u1qn&dl=1"
+
+download.file(url, destfile = "data/raw/shapefiles/eez.zip")
+unzip("data/raw/shapefiles/eez.zip", exdir = "data/raw/shapefiles")
+
+eez <- st_read(dsn = "data/raw/shapefiles", layer = "eez_v11", quiet = T) %>%
   clean_names () %>%
   filter (mrgid %in% c(5677, 5696, 21788, 21789, 5681)) 
 
 ```
 
+We load subsidies data 
 
 ```{r}
 
@@ -272,7 +280,7 @@ rab_brexit <- rab_brexit %>%
 
 ## Distribution of the subsidies 
 
-We plot the distribution of PAI (Plan d'accompagnement individuel) subsidies between vessel size class and gear 
+We plot the distribution of PAI ("Plan d'accompagnement individuel") subsidies between vessel size class and gear 
 
 ```{r}
 
@@ -346,9 +354,13 @@ data_map <- rab_brexit %>%
   left_join(read.xlsx("data/processed/coordinates_map_pai.xlsx") %>%
               select(-latitude, -longitude), by ="maritime_district")
            
-           
+url <- "https://www.dropbox.com/scl/fo/ux5xjf028fn1kqf76613p/AN5OKvxXWlU0TVYBuuQ-wxw?rlkey=v99hfa0kgo4x1xucrm1msjww3&dl=1"
+
+download.file(url, destfile = "data/raw/shapefiles/regions.zip")
+unzip("data/raw/shapefiles/regions.zip", exdir = "data/raw/shapefiles/")
+
 ggplot () + 
-    geom_sf(data = st_read(dsn = "data/raw/shapefiles/regions-20190101-shp", layer = "regions-20190101"), fill = "grey70", color = "grey50", linewidth = 0.1) +
+    geom_sf(data = st_read(dsn = "data/raw/shapefiles", layer = "regions-20190101"), fill = "grey70", color = "grey50", linewidth = 0.1) +
     geom_sf (data = data_map %>%
                  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
                  mutate(vessel_nb_cat = cut(vessel_nb, breaks = seq(from = 0, to = 20, by = 2), include.lowest = TRUE, right = FALSE)), aes(color = vessel_nb_cat), size = 5) +
@@ -464,78 +476,7 @@ rm(fifty_percent_value)
 
 ## Analysis of fishing effort in UK waters
 
-### Via get_raster
- 
-```{r}
-
-# we import fishing effort data downloaded on GFW and we filter them to keep only vessels that got a fleet exit plan.
-raster_gfw <- lapply(paste0("data/raw/gfw_get_raster/", list.files("data/raw/gfw_get_raster"), "/layer-activity-data-0/public-global-fishing-effort-v20231026.csv"), read.csv) %>%
-    bind_rows () %>%
-    clean_names () %>%
-    filter (mmsi %in% c(rab_brexit %>% filter(intitule_operation == "Plan d'accompagnement individuel Brexit") %>% distinct (mmsi) %>% pull (mmsi))) %>%
-  filter(time_range %in% c(2019,2020))
-
-
-#we convert lat/lon coordinates to gridded effort data
-raster_gfw_grid <- make_grid_gfw(raster_gfw, 0.01) %>%
-  mutate(id = 1:n())
-
-# we filter those data to keep only data in the UK 's EEZ. 
-raster_gfw_grid_intersect <- raster_gfw_grid %>%
-  st_intersection(eez %>% 
-                    filter(mrgid %in% c(5696, 21789, 21788)) %>% 
-                    summarise(geometry = st_union(geometry))) 
-
-sf_use_s2(FALSE)
-
-raster_gfw_grid_intersect <- raster_gfw_grid_intersect %>%
-  mutate(area = as.numeric(st_area(geometry))) %>%
-  filter(area >= max(area)/2) %>%
-  select(-area) 
-
-raster_gfw <- raster_gfw_grid %>%
-  slice(-c(raster_gfw_grid_intersect %>%
-             pull(id))) %>%
-  mutate(uk_eez = FALSE) %>%
-  bind_rows(raster_gfw_grid %>%
-              slice(c(raster_gfw_grid_intersect %>%
-                        pull(id))) %>%
-              mutate(uk_eez = TRUE)) %>%
-  arrange(id)
-
-rm(raster_gfw_grid, raster_gfw_grid_intersect)
-
-```
-
-We save these raster data. Hence you don't need to tun the last chunk
-
-```{r}
-write_rds(raster_gfw, "output/raster_gfw.rds")
-```
-
-We import the raster data
-
-```{r}
-raster_gfw <- readRDS("output/raster_gfw.rds")
-```
-
-The percentage of time spent fishing in UK waters over the 2019-2020 period is calculated from GFW raster data
-
-```{r}
-
-raster_summary <- raster_gfw %>%
-    st_drop_geometry () %>%
-    with_groups(c("mmsi", "time_range", "uk_eez"), summarise, effort = sum(apparent_fishing_hours)/24) %>% # effort expressed in days
-    with_groups(c("mmsi", "time_range"), mutate, effort_all = sum(effort), effort_rel = round(effort*100/sum(effort),1)) %>%
-    complete(mmsi, time_range, uk_eez) %>%
-    mutate(effort_rel = ifelse(is.na(effort_rel), 0, effort_rel),
-           effort = ifelse(is.na(effort), 0, effort)) %>%
-  filter(uk_eez == TRUE) %>%
-  select(mmsi, time_range, effort_raster = effort_all, effort_rel_raster = effort_rel)
-
-```
-
-### Via GFW trajectories (manually download on the GFW platform)
+Via GFW trajectories (manually downloaded on the GFW platform)
 
 We extract the list of mmsi to manually download the trajectories in GFW
 
@@ -558,17 +499,6 @@ trajectories_gfw <- trajectory_with_events_gfw(path = paste0("data/raw/trajector
 
 ```
 
-We save the trajectories data. Hence you don't have to rerun the last chunk
-
-```{r}
-write_rds(trajectories_gfw, "output/trajectories_with_fishing_events.rds")
-```
-
-```{r}
-trajectories_gfw <- readRDS("output/trajectories_with_fishing_events.rds")
-```
-
-
 ```{r}
 
 trajectories_summary <- fishing_eez_summary(data = trajectories_gfw, 
@@ -578,26 +508,6 @@ trajectories_summary <- fishing_eez_summary(data = trajectories_gfw,
   mutate(uk_guernsey_jersey_eez = rowSums(select(., c("united_kingdom_eez", "guernsey_eez", "jersey_eez"))))
 
 ```
-
-Let's join together estimations from raster and trajectories data
-
-```{r}
-
-rab_brexit %>%
-    filter(intitule_operation == "Plan d'accompagnement individuel Brexit") %>%
-    distinct(mmsi, vessel_name) %>%
-    mutate(mmsi = as.numeric(mmsi)) %>%
-    left_join(raster_summary %>%
-                  select(mmsi, time_range, effort_raster, effort_rel_raster)) %>%
-    left_join(trajectories_summary %>%
-                  mutate(vessel_mmsi = as.numeric(vessel_mmsi)) %>%
-                  select(mmsi = vessel_mmsi, time_range = year, effort_trajectories = effort_all, effort_rel_trajectories = uk_guernsey_jersey_eez)) %>%
-  kable () %>%
-  kable_paper(full_width = T)
-
-```
-
-Raster data look weird (number of fishing days per year are sometime higher than 365 days). Hence in the following we only look at the trajectories data to estimate the percent of time the vessel are fishing in UK waters.
 
 Among the `r rab_brexit %>% filter (intitule_operation == "Plan d'accompagnement individuel Brexit") %>% nrow ()` that received a PAI, we were able to download the trajectories for `r trajectories_gfw %>% distinct(vessel_mmsi) %>% nrow ()` vessels. 
 
@@ -962,27 +872,6 @@ ggsave(merge, filename = "output/figures/évolution des possibilités de pêche 
 
 ```
 
-Let's see if the quotas given to POs are quotas affected by the Brexit.
-
-Data on the distribution of quotas to producer organizations have been extracted from the Order of February 2, 2024 allocating certain fishing quotas granted to France for the year 2024 <https://www.legifrance.gouv.fr/loda/id/JORFTEXT000049084492/>
-
-```{r}
-
-quotas_op_2024 <- read.xlsx("data/raw/repartition des sous quotas entre op_2024.xlsx") %>%
-  clean_names () %>%
-  mutate(code_stock = str_replace_all(code_stock, " |\\.", "")) %>%
-  rename(code = code_stock) %>%
-  select(-non_adherant) %>%
-  full_join(shared_stocks_analysis %>%
-              select(code, nom_commun, transfert_perc:quota_lost_for_fra), by = "code") %>%
-  arrange(quota_lost_for_fra)
-
-write.xlsx(quotas_op_2024, "output/impact of brexit on quotas distributed to producer organizations.xlsx")
-
-rm(quotas_op_2024)
-
-```
-
 Estimated amount of individual support plan
 
 ```{r}
@@ -1028,135 +917,5 @@ ggplot(data = rab_brexit, aes(x = estimated_amount_of_aid_pai/10^6, y = montant_
     labs(x = "Estimated amount of subsidies (PAI)",
          y = "Amount of subsidies (PAI)") +
     theme_minimal()    
-```
-
-# Analysis of subsidies allocated under the temporary cessattion scheme
-
-We plot the distribution of temporary cessation subsidies between vessel size class and gear 
-
-```{r}
-
-ggplot(data = rab_brexit %>%
-         filter(intitule_operation == "Arrêts temporaires Brexit") %>%
-         with_groups(c("length_class", "gear"), summarise, vessel_nb = n(), montant_aide_publique = sum(montant_aide_publique)/10^6), aes(x=length_class, y=montant_aide_publique, fill = gear)) +
-  geom_col (color = "grey0") +
-  geom_text (aes(label = vessel_nb), fontface = "bold", color = "grey100", position = position_stack(vjust = .5)) +
-  #geom_text (aes(label = label), fontface = "bold", color = "grey100", position = position_stack(vjust = .5)) +
-  labs (x="Classe de taille des navires", y ="Montant perçu (million EUR)", title = "Répartition des subventions allouées aux navires de pêche dans le cadre des arrêts temporaires financés par la Réserve d'ajustement Brexit", fill = "Engin de pêche") + 
-  theme_bw () %+% 
-  theme(plot.caption= element_text(hjust = 0)) +
-  scale_fill_viridis_d ()
-
-```
-
-The fact that the estimated values of the subsidy are slightly lower than the real value of the subsidy (points above the straight line y = x) is linked to the fact that the estimated value does not take into account the severance payments made to fishermen. There are, however, a few points below the y = x line. 
-
-Check if vessels receiving subsidies for temporary shutdowns have indeed ceased operations during the subsidized period
-
-We first download Global Fishing Watch events.
-
-```{r}
-
-vessel_id <- rab_brexit %>%
-  filter(intitule_operation == "Arrêts temporaires Brexit" & !is.na(mmsi)) %>%
-  distinct(mmsi) %>%
-  mutate(gfw_id = NA)
-
-
-for (i in 1:nrow(vessel_id)) {
-  id <- get_vessel_info(
-    query = vessel_id[i, 1],
-    search_type = "search",
-    key = gfw_auth())
-  
-  if (!is.null(id)) {
-    vessel_id [i, 2] <- paste(id$selfReportedInfo %>% 
-                                select(id = vesselId, mmsi = ssvid, shipname) %>%
-                                filter (mmsi == vessel_id %>% slice(i) %>% pull(mmsi) & !is.na(shipname)) %>% # in some cases the mmsi found is different from the one indicated in the search
-                                pull (id), collapse = ",")
-  }
-  else if (is.null(id)) {
-    vessel_id [i, 2] <- NA
-  }
-}
-
-#download gfw fishing events
-
-vessel_id <- unlist(strsplit(vessel_id %>% filter(!is.na(gfw_id)) %>% pull(gfw_id), ","))
-
-start_date <- c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01", "2021-01-01")
-end_date <- c("2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01", "2021-01-01", "2022-01-01")
-
-
-fishing_events_at <- foreach(i=1:length(start_date)) %do% 
-  get_event(event_type = 'FISHING',
-                               vessels = vessel_id,
-                               start_date = ymd(start_date[i]),
-                               end_date = ymd(end_date[i]),
-                               key = gfw_auth ()) 
-
-
-fishing_events_at <- fishing_events_at %>%
-  bind_rows() %>%
-  mutate(id = 1 : nrow(.)) %>%
-  group_by(id) %>%
-  mutate(vessel_mmsi =  unlist(map(vessel, 3))[1]) %>%
-  ungroup()
-
-```
-
-```{r}
-
-fishing_events_at_processed <- rab_brexit %>%
-    filter(intitule_operation == "Arrêts temporaires Brexit" & !is.na(mmsi)) %>%
-    select(vessel_mmsi = mmsi) %>%
-    distinct(vessel_mmsi) %>%
-    mutate(date = map2(ymd("2015-01-01"), ymd("2021-12-31"), seq.Date, by = 1)) %>%
-    unnest(cols = c(date)) %>%
-    left_join(fishing_events_at %>%
-                  mutate(fishing_intervals = interval(as.Date(start), as.Date(end))) %>%
-                  select(vessel_mmsi, fishing_intervals) %>%
-                  with_groups(vessel_mmsi, summarise, fishing_intervals = list(fishing_intervals)), by = "vessel_mmsi") %>%
-    rowwise () %>%
-    mutate(event_count = length(fishing_intervals)) %>%
-    ungroup () %>%
-    filter(event_count > 0) %>%
-    select(-event_count) %>%
-    rowwise () %>%
-    mutate(event = ifelse(any(date %within% fishing_intervals), 1, NA)) %>%
-    select(-fishing_intervals) %>%
-    ungroup () 
-
-saveRDS(fishing_events_at_processed, "output/fishing_events_temporary_cessation.rds")
-
-# we add the date 2022-01-01 with NaN to reset cumsum for each new vessel (see after)
-
-fishing_events_at_processed <- fishing_events_at_processed %>%
-  bind_rows(fishing_events_at_processed %>%
-              distinct(vessel_mmsi) %>%
-              mutate(date = ymd("2022-01-01"))) %>% 
-  arrange(vessel_mmsi, date)
-
-
-
-vec <- fishing_events_at_processed %>% pull(event)
-
-fishing_events_at_processed <- fishing_events_at_processed %>%
-  bind_cols(cumulo = as.numeric(unlist(by(vec, rleid(vec), cumsum)))) %>%
-  mutate(five_days_cum = ifelse(cumulo %in% c(seq(from = 5, to = 365, by = 5)), 1, NA))
-
-```
-
-Let's try to see from this data whether the vessels that received subsidies under the temporary Brexit stoppages in 2021 fished less because of the Brexit than in previous years.
-
-```{r}
-
-fishing_events_at_processed %>%
-    mutate(year = year(date)) %>%
-    filter(year != 2022) %>%
-    with_groups(c("vessel_mmsi", "year"), summarise, fishing_days = sum(event, na.rm = T)) %>%
-    pivot_wider(names_from = year, values_from = fishing_days, names_prefix = "fishing_days_") %>%
-    with_groups(vessel_mmsi, summarise, max_fishing_days_2015_2020 = max(fishing_days_2015, fishing_days_2016, fishing_days_2017, fishing_days_2018, fishing_days_2019, fishing_days_2020), fishing_days_2021)
-
 ```
 
